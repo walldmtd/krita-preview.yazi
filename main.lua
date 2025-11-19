@@ -25,11 +25,17 @@ function M:preload(job)
 		return true
 	end
 
+	-- Extract the preview from the archive
+	local image_data, err = M.get_image_data(job.file.url)
+	if not image_data then
+		return false, err
+	end
+
 	local cmd = M.with_limit()
 	if job.args.flatten then
 		cmd:arg("-flatten")
 	end
-	cmd:arg({ tostring(job.file.url), "-auto-orient", "-strip" })
+	cmd:arg({ "-", "-auto-orient", "-strip" }) -- "-" means read image data from stdin
 
 	local size = string.format("%dx%d>", rt.preview.max_width, rt.preview.max_height)
 	if rt.preview.image_filter == "nearest" then
@@ -49,7 +55,12 @@ function M:preload(job)
 		cmd:arg({ "-background", job.args.bg, "-alpha", "remove" })
 	end
 
-	local status, err = cmd:arg(string.format("JPG:%s", cache)):status()
+	-- Spawn the process and write the image data to its stdin
+	local proc = cmd:arg(string.format("JPG:%s", cache)):stdin(Command.PIPED):spawn()
+	proc:write_all(image_data)
+	proc:flush()
+	local status, err = proc:wait()
+
 	if not status then
 		return true, Err("Failed to start `magick`, error: %s", err)
 	elseif not status.success then
@@ -75,6 +86,26 @@ function M.with_limit()
 		cmd:arg({ "-limit", "height", rt.tasks.image_bound[2] })
 	end
 	return cmd
+end
+
+function M.get_image_data(url)
+	local cmd_unzip = Command("unzip"):arg({ "-jp", tostring(url), "preview.png" })
+	local cmd_7z = Command("7z"):arg({ "e", "-so", tostring(url), "preview.png" })
+
+	local output = cmd_unzip:output()
+	if not output then
+		-- Try with `7z` instead
+		output = cmd_7z:output()
+		if not output then
+			return nil, Err("Failed to start `unzip` or `7z`")
+		elseif not output.status.success then
+			return nil, Err("`7z` exited with error code: %s", output.status.code)
+		end
+	elseif not output.status.success then
+		return nil, Err("`unzip` exited with error code: %s", output.status.code)
+	end
+
+	return output.stdout
 end
 
 return M
